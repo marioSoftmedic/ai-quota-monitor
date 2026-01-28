@@ -1,6 +1,6 @@
 #!/bin/bash
 # <xbar.title>AI Quota Monitor</xbar.title>
-# <xbar.version>8.5</xbar.version>
+# <xbar.version>9.0</xbar.version>
 # <xbar.author>Weli</xbar.author>
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
@@ -30,26 +30,30 @@ if [ -f "$AG_SCRIPT" ]; then
         claude-sonnet*)     NAME="Claude Sonnet" ;;
         gemini-3-flash*)    NAME="Gemini Flash" ;;
         gemini-3-pro*)      NAME="Gemini Pro" ;;
-        gpt-oss-120b*)      NAME="OpenCode (Codex AG)" ;;
+        gpt-oss-120b*)      NAME="OpenCode (AG)" ;;
         chat_20706)         NAME="GPT-4o (AG)" ;;
         chat_23310)         NAME="GPT-4o-mini (AG)" ;;
         *)                  NAME="$MODEL" ;;
       esac
 
       FILLED=$((REM / 20))
+      EMPTY=$((5 - FILLED))
       BAR=""
       for ((i=0; i<FILLED; i++)); do BAR+="█"; done
-      for ((i=0; i<(5-FILLED); i++)); do BAR+="░"; done
+      for ((i=0; i<EMPTY; i++)); do BAR+="░"; done
 
-      [ "$REM" -ge 80 ] && CLR="green" || ([ "$REM" -ge 50 ] && CLR="#FFD700" || ([ "$REM" -ge 20 ] && CLR="orange" || CLR="red"))
-      
+      if [ "$REM" -ge 80 ]; then CLR="green"
+      elif [ "$REM" -ge 50 ]; then CLR="#FFD700"
+      elif [ "$REM" -ge 20 ]; then CLR="orange"
+      else CLR="red"; fi
+
       LINES+="$BAR  ${REM}%  $NAME | font=Menlo size=12 color=$CLR\n"
       LINES+="     ↻ $RESET | font=Menlo size=10 color=#666666\n"
     fi
   done <<< "$RAW"
 fi
 
-# --- 2. Codex Models (Direct CLI) ---
+# --- 2. OpenAI Codex ---
 CX_LINES=""
 if [ -f "$CX_SCRIPT" ]; then
   CX_JSON=$(python3 "$CX_SCRIPT" --json 2>/dev/null)
@@ -57,11 +61,16 @@ if [ -f "$CX_SCRIPT" ]; then
     BAL=$(echo "$CX_JSON" | python3 -c "import json, sys; d=json.load(sys.stdin); print(round(float(d.get('credits', {}).get('balance', 0)), 2))")
     USED_P=$(echo "$CX_JSON" | python3 -c "import json, sys; d=json.load(sys.stdin); print(int(d['secondary']['used_percent']))")
     REM_P=$((100 - USED_P))
+    
     if [ "$REM_P" -lt "$WORST" ]; then WORST=$REM_P; fi
-    [ "$REM_P" -ge 80 ] && C="green" || ([ "$REM_P" -ge 50 ] && C="#FFD700" || ([ "$REM_P" -ge 20 ] && C="orange" || C="red"))
+    
+    if [ "$REM_P" -ge 80 ]; then CX_CLR="green"
+    elif [ "$REM_P" -ge 50 ]; then CX_CLR="#FFD700"
+    elif [ "$REM_P" -ge 20 ]; then CX_CLR="orange"
+    else CX_CLR="red"; fi
     
     CX_LINES="🧠  Codex / OpenCode | font=Menlo size=12 color=white\n"
-    CX_LINES+="█████  ${REM_P}%  Cuota Semanal | font=Menlo size=12 color=$C\n"
+    CX_LINES+="█████  ${REM_P}%  Cuota Semanal | font=Menlo size=12 color=$CX_CLR\n"
     CX_LINES+="     💰 \$${BAL} balance disponible | font=Menlo size=10 color=#666666\n"
     CX_LINES+="     • gpt-5.1-codex-max | size=11 color=#bbbbbb\n"
     CX_LINES+="     • gpt-5.1-codex-mini | size=11 color=#bbbbbb\n"
@@ -69,18 +78,28 @@ if [ -f "$CX_SCRIPT" ]; then
   fi
 fi
 
-# --- 3. GLM 4.7 & Clawdbot ---
-GLM_STATUS="🟢  GLM 4.7 (Suscripción)  ·  Activa | font=Menlo size=12 color=cyan\n"
+# --- Menu Bar Icon ---
+if [ "$WORST" -ge 80 ]; then ICON="🟢"
+elif [ "$WORST" -ge 50 ]; then ICON="🟡"
+elif [ "$WORST" -ge 20 ]; then ICON="🟠"
+else ICON="🔴"; fi
 
-# --- Menu Bar ---
-[ "$WORST" -ge 80 ] && ICON="🟢" || ([ "$WORST" -ge 50 ] && ICON="🟡" || ([ "$WORST" -ge 20 ] && ICON="🟠" || ICON="🔴"))
 echo "$ICON AI | size=13"
 echo "---"
 echo "🎮 Centro de Mando IA | size=14"
 echo "---"
-[ -n "$LINES" ] && echo -e "$LINES"
-[ -n "$CX_LINES" ] && echo -e "---\n$CX_LINES"
-echo -e "---\n$GLM_STATUS"
+
+if [ -n "$LINES" ]; then
+  echo -e "$LINES"
+fi
+
+if [ -n "$CX_LINES" ]; then
+  echo -e "---"
+  echo -e "$CX_LINES"
+fi
+
+echo "---"
+echo "🟢 GLM 4.7 (Suscripción) · Activa | font=Menlo size=12 color=cyan"
 echo "---"
 echo "🔄 Actualizar | refresh=true"
 echo "📋 Abrir Notion | href=https://www.notion.so/Centro-de-Mando-IA-Suscripciones-Usos-2f517c8f978b81f58f82c4d8df686d33"
