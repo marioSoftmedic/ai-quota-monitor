@@ -37,9 +37,10 @@ Click to see the full breakdown with progress bars per model.
 
 | Service | How it reads quota |
 |---------|-------------------|
-| **Google Antigravity** | Via `antigravity-quota` skill (queries Antigravity API) |
-| **OpenAI Codex** | Via `codex-quota` skill (reads local session logs) |
-| **Claude Code** | Via `claude-code-usage` skill (queries Anthropic OAuth API) |
+| **Google Antigravity** | Via `antigravity-quota` skill. Supports Claude, Gemini, and GPT-4o models. |
+| **OpenAI Codex (Direct)** | Via `codex-quota` skill. Reads local session logs for balance ($) and weekly usage. |
+| **GLM 4.7** | Manual status for active subscriptions. |
+| **Claude Code** | Via `claude-code-usage` skill (queries Anthropic OAuth API). |
 
 ## Requirements
 
