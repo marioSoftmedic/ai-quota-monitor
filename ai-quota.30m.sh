@@ -1,6 +1,6 @@
 #!/bin/bash
 # <xbar.title>AI Quota Monitor</xbar.title>
-# <xbar.version>9.0</xbar.version>
+# <xbar.version>10.5</xbar.version>
 # <xbar.author>Weli</xbar.author>
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
@@ -14,43 +14,44 @@ LINES=""
 
 # --- 1. Antigravity Models ---
 if [ -f "$AG_SCRIPT" ]; then
-  RAW=$(node "$AG_SCRIPT" 2>/dev/null)
-  while IFS= read -r line; do
-    trimmed=$(echo "$line" | sed 's/^[[:space:]]*//')
-    if echo "$trimmed" | grep -qE '^[a-z0-9_].*: [0-9].*%'; then
-      MODEL=$(echo "$trimmed" | cut -d: -f1)
-      REM_F=$(echo "$trimmed" | grep -oE '[0-9]+\.[0-9]+%' | head -1 | sed 's/%//')
-      REM=${REM_F%.*}
-      RESET=$(echo "$trimmed" | sed 's/.*resets //' | sed 's/)//')
+  # Use Python for robust parsing of the raw output
+  AG_PARSED=$(node "$AG_SCRIPT" 2>/dev/null | python3 -c "
+import sys, re
+models = []
+for line in sys.stdin:
+    m = re.search(r'^\s*([a-z0-9_-]+):\s*([0-9.]+).*% \(resets (.*)\)', line)
+    if m:
+        name_raw, rem, reset = m.groups()
+        rem = float(rem)
+        name = name_raw
+        if 'claude-opus' in name_raw: name = 'Claude Opus'
+        elif 'claude-sonnet' in name_raw: name = 'Claude Sonnet'
+        elif 'gemini-3-flash' in name_raw: name = 'Gemini Flash'
+        elif 'gemini-3-pro' in name_raw: name = 'Gemini Pro'
+        elif 'chat_20706' in name_raw: name = 'GPT-4o (AG)'
+        elif 'chat_23310' in name_raw: name = 'GPT-4o-mini (AG)'
+        elif 'gpt-oss-120b' in name_raw: name = 'OpenCode (AG)'
+        
+        models.append({'name': name, 'rem': rem, 'reset': reset})
 
-      if [ "$REM" -lt "$WORST" ]; then WORST=$REM; fi
+# Deduplicate by name (keeping lowest quota for that name group)
+dedup = {}
+for m in models:
+    if m['name'] not in dedup or m['rem'] < dedup[m['name']]['rem']:
+        dedup[m['name']] = m
 
-      case "$MODEL" in
-        claude-opus*)       NAME="Claude Opus" ;;
-        claude-sonnet*)     NAME="Claude Sonnet" ;;
-        gemini-3-flash*)    NAME="Gemini Flash" ;;
-        gemini-3-pro*)      NAME="Gemini Pro" ;;
-        gpt-oss-120b*)      NAME="OpenCode (AG)" ;;
-        chat_20706)         NAME="GPT-4o (AG)" ;;
-        chat_23310)         NAME="GPT-4o-mini (AG)" ;;
-        *)                  NAME="$MODEL" ;;
-      esac
-
-      FILLED=$((REM / 20))
-      EMPTY=$((5 - FILLED))
-      BAR=""
-      for ((i=0; i<FILLED; i++)); do BAR+="█"; done
-      for ((i=0; i<EMPTY; i++)); do BAR+="░"; done
-
-      if [ "$REM" -ge 80 ]; then CLR="green"
-      elif [ "$REM" -ge 50 ]; then CLR="#FFD700"
-      elif [ "$REM" -ge 20 ]; then CLR="orange"
-      else CLR="red"; fi
-
-      LINES+="$BAR  ${REM}%  $NAME | font=Menlo size=12 color=$CLR\n"
-      LINES+="     ↻ $RESET | font=Menlo size=10 color=#666666\n"
-    fi
-  done <<< "$RAW"
+for m in sorted(dedup.values(), key=lambda x: x['rem']):
+    filled = int(m['rem'] / 20)
+    bar = '█' * filled + '░' * (5 - filled)
+    clr = 'red' if m['rem'] < 20 else ('orange' if m['rem'] < 50 else ('#FFD700' if m['rem'] < 80 else 'green'))
+    print(f\"{bar}  {int(m['rem'])}%  {m['name']} | font=Menlo size=12 color={clr}\")
+    print(f\"     ↻ {m['reset']} | font=Menlo size=10 color=#666666\")
+")
+  LINES="$AG_PARSED"
+  
+  # Calculate worst for the icon
+  LOWEST=$(node "$AG_SCRIPT" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+%' | sed 's/\..*//' | sort -n | head -1)
+  WORST=${LOWEST:-100}
 fi
 
 # --- 2. OpenAI Codex ---
@@ -61,20 +62,11 @@ if [ -f "$CX_SCRIPT" ]; then
     BAL=$(echo "$CX_JSON" | python3 -c "import json, sys; d=json.load(sys.stdin); print(round(float(d.get('credits', {}).get('balance', 0)), 2))")
     USED_P=$(echo "$CX_JSON" | python3 -c "import json, sys; d=json.load(sys.stdin); print(int(d['secondary']['used_percent']))")
     REM_P=$((100 - USED_P))
-    
     if [ "$REM_P" -lt "$WORST" ]; then WORST=$REM_P; fi
-    
-    if [ "$REM_P" -ge 80 ]; then CX_CLR="green"
-    elif [ "$REM_P" -ge 50 ]; then CX_CLR="#FFD700"
-    elif [ "$REM_P" -ge 20 ]; then CX_CLR="orange"
-    else CX_CLR="red"; fi
-    
+    [ "$REM_P" -ge 80 ] && C="green" || ([ "$REM_P" -ge 50 ] && C="#FFD700" || ([ "$REM_P" -ge 20 ] && C="orange" || C="red"))
     CX_LINES="🧠  Codex / OpenCode | font=Menlo size=12 color=white\n"
-    CX_LINES+="█████  ${REM_P}%  Cuota Semanal | font=Menlo size=12 color=$CX_CLR\n"
+    CX_LINES+="█████  ${REM_P}%  Cuota Semanal | font=Menlo size=12 color=$C\n"
     CX_LINES+="     💰 \$${BAL} balance disponible | font=Menlo size=10 color=#666666\n"
-    CX_LINES+="     • gpt-5.1-codex-max | size=11 color=#bbbbbb\n"
-    CX_LINES+="     • gpt-5.1-codex-mini | size=11 color=#bbbbbb\n"
-    CX_LINES+="     • gpt-5.2-codex | size=11 color=#bbbbbb\n"
   fi
 fi
 
