@@ -1,87 +1,124 @@
 #!/bin/bash
-# <xbar.title>AI Quota Monitor</xbar.title>
-# <xbar.version>12.0</xbar.version>
-# <xbar.author>Weli</xbar.author>
+# <xbar.title>AI Quota Monitor V2</xbar.title>
+# <xbar.version>15.0</xbar.version>
+# <xbar.author>Cotocha (Weli Assistant)</xbar.author>
+# <xbar.desc>Monitor robusto de cuotas LLM con parsing real y tracking de estado.</xbar.desc>
 
+# --- Configuración de Paths ---
+# Ajusta estos paths a tu entorno local
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
-SKILL_DIR="/Users/marioinostroza/clawd/skills/clawdbot-official/skills"
-AG_SCRIPT="$SKILL_DIR/mukhtharcm/antigravity-quota/check-quota.js"
-CX_SCRIPT="$SKILL_DIR/odrobnik/codex-quota/codex-quota.py"
+# Directorio de sesiones (Clawdbot logs)
+SESSIONS_DIR="$HOME/.clawdbot/agents/main/sessions"
+CACHE_DIR="$HOME/.cache/ai-quota-monitor"
+mkdir -p "$CACHE_DIR"
 
-# --- 1. Data Collection ---
-AG_DATA=$(node "$AG_SCRIPT" 2>/dev/null)
-CX_JSON=$(python3 "$CX_SCRIPT" --json 2>/dev/null)
+STATE_FILE="$CACHE_DIR/last_offsets.json"
+DAILY_STATS="$CACHE_DIR/daily_stats_$(date +%Y-%m-%d).json"
 
-# --- 2. Logic & Icons ---
-# Extract percentages safely
-LOWEST_AG=$(echo "$AG_DATA" | grep -oE '[0-9]+\.[0-9]+%' | sed 's/\..*//' | sort -n | head -1)
-LOWEST_AG=${LOWEST_AG:-100}
+# --- Precios por 1M de Tokens (USD) ---
+# Puedes editarlos según cambien los precios de OpenAI/Gemini/Zai
+PRICE_OPENAI=2.50
+PRICE_GOOGLE=1.00
+PRICE_ZAI=0.50
 
-CX_REM=100
-if [ -n "$CX_JSON" ] && [[ "$CX_JSON" == *"secondary"* ]]; then
-    CX_REM=$(echo "$CX_JSON" | python3 -c "import json, sys; d=json.load(sys.stdin); print(int(100 - d['secondary']['used_percent']))" 2>/dev/null || echo 100)
-fi
+# --- Lógica de Parsing V2 (Robusta) ---
 
-# Determine global worst for menu bar icon
-FINAL_REM=$LOWEST_AG
-[ $CX_REM -lt $FINAL_REM ] && FINAL_REM=$CX_REM
+# Inicializar archivos de estado
+[ ! -f "$STATE_FILE" ] && echo "{}" > "$STATE_FILE"
+[ ! -f "$DAILY_STATS" ] && echo '{"openai":0, "google":0, "zai":0, "total":0, "tokens":0}' > "$DAILY_STATS"
 
-[ $FINAL_REM -lt 20 ] && ICON="🔴" || ([ $FINAL_REM -lt 50 ] && ICON="🟠" || ([ $FINAL_REM -lt 80 ] && ICON="🟡" || ICON="🟢"))
+process_sessions() {
+    # Solo procesar archivos modificados en las últimas 24h
+    find "$SESSIONS_DIR" -name "*.jsonl" -mtime -1 2>/dev/null | while read -r session_path; do
+        session_id=$(basename "$session_path")
+        last_offset=$(jq -r ".[\"$session_id\"] // 0" "$STATE_FILE")
+        current_size=$(stat -f%z "$session_path" 2>/dev/null || stat -c%s "$session_path" 2>/dev/null)
+        
+        if [ "$current_size" -gt "$last_offset" ]; then
+            # Leer solo lo nuevo
+            tail -c +$((last_offset + 1)) "$session_path" | while read -r line; do
+                [ -z "$line" ] && continue
+                
+                # Extraer usage con jq (Soporta múltiples formatos de Clawdbot)
+                usage=$(echo "$line" | jq -c '.message.usage // .usage // empty' 2>/dev/null)
+                if [ -n "$usage" ]; then
+                    tokens=$(echo "$usage" | jq -r '.totalTokens // .total_tokens // 0')
+                    provider_raw=$(echo "$line" | jq -r '.message.provider // .provider // "unknown"')
+                    
+                    cost=0
+                    prov_key="unknown"
+                    if [[ "$provider_raw" == *"openai"* ]]; then
+                        prov_key="openai"
+                        cost=$(echo "scale=6; $tokens * $PRICE_OPENAI / 1000000" | bc -l)
+                    elif [[ "$provider_raw" == *"google"* || "$provider_raw" == *"antigravity"* ]]; then
+                        prov_key="google"
+                        cost=$(echo "scale=6; $tokens * $PRICE_GOOGLE / 1000000" | bc -l)
+                    elif [[ "$provider_raw" == *"zai"* ]]; then
+                        prov_key="zai"
+                        cost=$(echo "scale=6; $tokens * $PRICE_ZAI / 1000000" | bc -l)
+                    fi
+                    
+                    if [ "$prov_key" != "unknown" ]; then
+                        tmp_stats="$DAILY_STATS.tmp"
+                        jq ".tokens += $tokens | .[\"$prov_key\"] += $cost | .total += $cost" "$DAILY_STATS" > "$tmp_stats" && mv "$tmp_stats" "$DAILY_STATS"
+                    fi
+                fi
+            done
+            # Guardar nuevo offset
+            tmp_state="$STATE_FILE.tmp"
+            jq ".[\"$session_id\"] = $current_size" "$STATE_FILE" > "$tmp_state" && mv "$tmp_state" "$STATE_FILE"
+        fi
+    done
+}
 
-# --- 3. Output ---
-echo "$ICON AI | size=13"
+# Ejecutar proceso (silencioso)
+process_sessions >/dev/null 2>&1
+
+# --- Recopilación de Datos para Display ---
+STATS=$(cat "$DAILY_STATS")
+TOTAL_USD=$(echo "$STATS" | jq -r '.total')
+TOTAL_TOKENS=$(echo "$STATS" | jq -r '.tokens')
+OA_USD=$(echo "$STATS" | jq -r '.openai')
+G_USD=$(echo "$STATS" | jq -r '.google')
+Z_USD=$(echo "$STATS" | jq -r '.zai')
+
+# Determinar icono de salud (basado en presupuesto diario de $25 total aprox)
+HEALTH_ICON="🟢"
+[ $(echo "$TOTAL_USD > 10" | bc -l) -eq 1 ] && HEALTH_ICON="🟡"
+[ $(echo "$TOTAL_USD > 18" | bc -l) -eq 1 ] && HEALTH_ICON="🟠"
+[ $(echo "$TOTAL_USD > 22" | bc -l) -eq 1 ] && HEALTH_ICON="🔴"
+
+# --- Output Final (xbar format) ---
+echo "$HEALTH_ICON \$${TOTAL_USD:0:4} | size=13"
 echo "---"
-echo "🎮 Centro de Mando IA | size=14"
+echo "🎮 Centro de Mando IA V2 | size=14"
 echo "---"
 
-# Parse AG Models with Python
-if [ -n "$AG_DATA" ]; then
-    echo "$AG_DATA" | python3 -c "
-import sys, re
-models = {}
-for line in sys.stdin:
-    m = re.search(r'^\s*([a-z0-9_-]+):\s*([0-9.]+).*% \(resets (.*)\)', line)
-    if m:
-        id, rem, reset = m.groups()
-        rem = float(rem)
-        name = id
-        if 'claude-opus' in id: name = 'Claude Opus'
-        elif 'claude-sonnet' in id: name = 'Claude Sonnet'
-        elif 'gemini-3-flash' in id: name = 'Gemini Flash'
-        elif 'gemini-3-pro' in id: name = 'Gemini Pro'
-        elif 'chat_20706' in id: name = 'GPT-4o (AG)'
-        elif 'chat_23310' in id: name = 'GPT-4o-mini (AG)'
-        elif 'gpt-oss-120b' in id: name = 'OpenCode (AG)'
-        else: continue
-        if name not in models or rem < models[name]['rem']:
-            models[name] = {'rem': rem, 'reset': reset}
-for name in sorted(models.keys()):
-    m = models[name]
-    pct = int(m['rem'])
-    f = pct // 20
-    bar = '█' * f + '░' * (5 - f)
-    clr = 'red' if pct < 20 else ('orange' if pct < 50 else ('#FFD700' if pct < 80 else 'green'))
-    print(f'{bar}  {pct}%  {name} | font=Menlo size=12 color={clr}')
-    print(f'     ↻ {m[\"reset\"]} | font=Menlo size=10 color=#666666')
+# Progress Bar Helper (Python)
+render_bar() {
+    local val=$1
+    local limit=$2
+    local label=$3
+    local color=$4
+    python3 -c "
+pct = min(int(($val/$limit)*100), 100)
+f = pct // 20
+bar = '█' * f + '░' * (5 - f)
+print(f'{bar}  {pct}%  $label | font=Menlo size=12 color=$color')
 "
-fi
+}
 
-# Render Codex
-if [ -n "$CX_JSON" ] && [[ "$CX_JSON" == *"balance"* ]]; then
-    echo "---"
-    echo "🧠 Codex / OpenCode (Direct CLI) | font=Menlo size=12 color=white"
-    BAL=$(echo "$CX_JSON" | python3 -c "import json, sys; d=json.load(sys.stdin); print(round(float(d.get('credits', {}).get('balance', 0)), 2))" 2>/dev/null || echo "0.00")
-    COLOR="red"; [ $CX_REM -ge 20 ] && COLOR="orange"; [ $CX_REM -ge 50 ] && COLOR="#FFD700"; [ $CX_REM -ge 80 ] && COLOR="green"
-    BAR_FILLED=$((CX_REM / 20)); BAR=""
-    for ((i=0; i<BAR_FILLED; i++)); do BAR+="█"; done
-    for ((i=0; i<(5-BAR_FILLED); i++)); do BAR+="░"; done
-    echo "$BAR  ${CX_REM}%  Cuota Semanal | font=Menlo size=12 color=$COLOR"
-    echo "     💰 \$$BAL balance disponible | font=Menlo size=10 color=#666666"
-fi
+echo "Hoy: $TOTAL_TOKENS tokens usados"
+echo "Costo Total: \$$TOTAL_USD USD"
+echo "---"
+
+# Detalle por Provider
+render_bar "$OA_USD" 15 "OpenAI ($OA_USD)" "cyan"
+render_bar "$G_USD" 8 "Google ($G_USD)" "orange"
+render_bar "$Z_USD" 8 "ZAI/GLM ($Z_USD)" "purple"
 
 echo "---"
-echo "🟢 GLM 4.7 (Suscripción) · Activa | font=Menlo size=12 color=cyan"
-echo "---"
+echo "📂 Logs: $SESSIONS_DIR | size=10"
 echo "🔄 Actualizar | refresh=true"
 echo "📋 Abrir Notion | href=https://www.notion.so/Centro-de-Mando-IA-Suscripciones-Usos-2f517c8f978b81f58f82c4d8df686d33"
